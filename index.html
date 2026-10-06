@@ -143,16 +143,14 @@ table.p-table tbody input[type=number]{text-align:right}
 .stat .v{font-size:20px;font-weight:800}
 .stat .l{font-size:10.5px;text-transform:uppercase;opacity:.8;margin-top:3px;font-weight:700}
 .vide-etat{text-align:center;padding:40px 16px;color:#94a3b8}
-
 #loadOverlay{position:fixed;inset:0;background:rgba(11,60,93,.96);color:#fff;z-index:9999;
   display:none;align-items:center;justify-content:center;flex-direction:column;font-family:sans-serif}
 #loadOverlay.show{display:flex}
 #loadOverlay .sp{width:50px;height:50px;border:4px solid rgba(255,255,255,.25);
   border-top-color:var(--or);border-radius:50%;animation:spin 1s linear infinite;margin-bottom:18px}
-#loadOverlay .tx{font-size:15px;font-weight:600;letter-spacing:.5px}
+#loadOverlay .tx{font-size:15px;font-weight:600}
 #loadOverlay .sub{font-size:12px;opacity:.7;margin-top:6px}
 @keyframes spin{to{transform:rotate(360deg)}}
-
 @media print{
   body{background:#fff}
   .appbar,.barre-actions,.no-print,.tabs,.add-ligne,.sign-tools{display:none !important}
@@ -354,8 +352,8 @@ table.p-table tbody input[type=number]{text-align:right}
 var $ = function(s){ return document.querySelector(s); };
 var $$ = function(s){ return Array.from(document.querySelectorAll(s)); };
 
-var K_SET = 'cm_set_v7';
-var K_FACT = 'cm_fact_v7';
+var K_SET = 'cm_set_v8';
+var K_FACT = 'cm_fact_v8';
 
 var DEFAUT = {
   cabinet:"CONSEILS MALINS", slogan:"Votre partenaire en solutions de filtration",
@@ -576,6 +574,7 @@ canvas.addEventListener('touchmove',trace,{passive:false});
 $('#btnClearSign').addEventListener('click', function(){
   ctx.clearRect(0,0,canvas.width,canvas.height);
   sigVide = true;
+  planifierPreGen();
   toast('Signature effacée');
 });
 
@@ -591,8 +590,7 @@ function nomFichier(){
 }
 
 /* ============================================================
-   CRÉATION DU PDF — Retourne un Blob
-   Largeur FIXE 780px pour un rendu identique à chaque fois
+   CRÉATION DU PDF
    ============================================================ */
 async function creerPDFBlob(){
   if(typeof html2canvas === 'undefined'){ throw new Error('html2canvas non chargé'); }
@@ -714,106 +712,190 @@ async function creerPDFBlob(){
 }
 
 /* ============================================================
-   TÉLÉCHARGER LE PDF (bouton PDF uniquement)
+   CACHE PDF — pré-génération en arrière-plan
+   ============================================================ */
+var pdfCache = { file: null, fingerprint: '', ready: false, generating: false };
+
+function calculerEmpreinte(){
+  var f = lire();
+  return JSON.stringify({
+    num: f.numero, date: f.date, echeance: f.echeance, statut: f.statut,
+    client: f.client, lignes: f.lignes,
+    remise: f.remisePct, tva: f.tvaPct, notes: f.notes,
+    sig: sigVide ? '' : 'sig-ok'
+  });
+}
+
+async function preGenererPDF(){
+  if(pdfCache.generating) return;
+  var f = lire();
+  if(!f.client.nom || !f.lignes.length) return;
+  var fp = calculerEmpreinte();
+  if(fp === pdfCache.fingerprint && pdfCache.ready) return;
+  pdfCache.generating = true;
+  try {
+    var blob = await creerPDFBlob();
+    var file = new File([blob], nomFichier(), {type:'application/pdf'});
+    pdfCache.file = file;
+    pdfCache.fingerprint = fp;
+    pdfCache.ready = true;
+    console.log('✅ PDF pré-généré prêt');
+  } catch(e){
+    console.warn('Pré-génération échouée', e);
+  } finally {
+    pdfCache.generating = false;
+  }
+}
+
+var preGenTimer;
+function planifierPreGen(){
+  pdfCache.ready = false;
+  clearTimeout(preGenTimer);
+  preGenTimer = setTimeout(preGenererPDF, 1500);
+}
+document.addEventListener('input', planifierPreGen);
+document.addEventListener('change', planifierPreGen);
+
+/* ============================================================
+   PARTAGE DU FICHIER PDF (doit être appelé SYNCHRONE dans un clic)
+   ============================================================ */
+function partagerFichier(file, f, reseau){
+  if(navigator.canShare && navigator.canShare({files:[file]})){
+    navigator.share({
+      files: [file],
+      title: 'Facture ' + f.numero,
+      text: 'Voici votre facture ' + f.numero + ' de la part de ' + SETTINGS.cabinet
+    }).then(function(){
+      toast('✅ Facture partagée');
+    }).catch(function(err){
+      if(err.name !== 'AbortError'){
+        console.warn('Partage refusé', err);
+        fallbackTexte(f, reseau);
+      }
+    });
+  } else {
+    telechargerEtOuvrir(file, f, reseau);
+  }
+}
+
+function fallbackTexte(f, reseau){
+  var txt = construireTexte(f);
+  var num = (f.client.tel || '').replace(/[^\d]/g,'');
+  if(num.length === 9 && num[0] === '7') num = '221' + num;
+  var url;
+  if(reseau === 'whatsapp'){
+    url = num.length >= 8 
+      ? 'https://wa.me/' + num + '?text=' + encodeURIComponent(txt)
+      : 'https://wa.me/?text=' + encodeURIComponent(txt);
+  } else {
+    url = 'https://t.me/share/url?url=' + encodeURIComponent('Facture ' + f.numero) + '&text=' + encodeURIComponent(txt);
+  }
+  window.open(url, '_blank');
+  toast('💬 App ouvert — joignez le PDF si besoin');
+}
+
+function telechargerEtOuvrir(file, f, reseau){
+  var url = URL.createObjectURL(file);
+  var a = document.createElement('a');
+  a.href = url; a.download = file.name;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 5000);
+  fallbackTexte(f, reseau);
+  toast('📄 PDF téléchargé — joignez-le avec 📎');
+}
+
+/* ============================================================
+   BOUTON WHATSAPP
+   ============================================================ */
+function envoyerWhatsApp(){
+  var f = lire();
+  if(!f.client.nom){ toast('⚠️ Indiquez le nom du client'); return; }
+  if(!f.lignes.length){ toast('⚠️ Ajoutez au moins une ligne'); return; }
+  
+  var fp = calculerEmpreinte();
+  if(pdfCache.ready && pdfCache.fingerprint === fp && pdfCache.file){
+    partagerFichier(pdfCache.file, f, 'whatsapp');
+    return;
+  }
+  
+  if(pdfCache.generating){
+    toast('⏳ PDF en préparation... Cliquez à nouveau dans 2 secondes');
+    return;
+  }
+  
+  toast('⏳ Préparation du PDF... Cliquez à nouveau dans 3 secondes');
+  preGenererPDF().then(function(){
+    if(pdfCache.ready && pdfCache.fingerprint === calculerEmpreinte() && pdfCache.file){
+      partagerFichier(pdfCache.file, f, 'whatsapp');
+    } else {
+      toast('⚠️ Réessayez dans un instant');
+    }
+  });
+}
+
+/* ============================================================
+   BOUTON TELEGRAM
+   ============================================================ */
+function envoyerTelegram(){
+  var f = lire();
+  if(!f.client.nom){ toast('⚠️ Indiquez le nom du client'); return; }
+  if(!f.lignes.length){ toast('⚠️ Ajoutez au moins une ligne'); return; }
+  
+  var fp = calculerEmpreinte();
+  if(pdfCache.ready && pdfCache.fingerprint === fp && pdfCache.file){
+    partagerFichier(pdfCache.file, f, 'telegram');
+    return;
+  }
+  
+  if(pdfCache.generating){
+    toast('⏳ PDF en préparation... Cliquez à nouveau dans 2 secondes');
+    return;
+  }
+  
+  toast('⏳ Préparation du PDF... Cliquez à nouveau dans 3 secondes');
+  preGenererPDF().then(function(){
+    if(pdfCache.ready && pdfCache.fingerprint === calculerEmpreinte() && pdfCache.file){
+      partagerFichier(pdfCache.file, f, 'telegram');
+    } else {
+      toast('⚠️ Réessayez dans un instant');
+    }
+  });
+}
+
+/* ============================================================
+   BOUTON PDF (téléchargement uniquement)
    ============================================================ */
 async function telechargerPDF(){
   var f = lire();
   if(!f.client.nom){ toast('⚠️ Indiquez le nom du client'); return; }
   if(!f.lignes.length){ toast('⚠️ Ajoutez au moins une ligne'); return; }
-
+  
+  var fp = calculerEmpreinte();
+  if(pdfCache.ready && pdfCache.fingerprint === fp && pdfCache.file){
+    var url = URL.createObjectURL(pdfCache.file);
+    var a = document.createElement('a');
+    a.href = url; a.download = pdfCache.file.name;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 5000);
+    toast('✅ PDF téléchargé');
+    return;
+  }
+  
   showLoad('Génération du PDF...');
   try {
     var blob = await creerPDFBlob();
     hideLoad();
-    
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement('a');
-    a.href = url;
-    a.download = nomFichier();
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(function(){ URL.revokeObjectURL(url); }, 5000);
+    var url2 = URL.createObjectURL(blob);
+    var a2 = document.createElement('a');
+    a2.href = url2; a2.download = nomFichier();
+    document.body.appendChild(a2); a2.click(); document.body.removeChild(a2);
+    setTimeout(function(){ URL.revokeObjectURL(url2); }, 5000);
     toast('✅ PDF téléchargé');
   } catch(err){
     hideLoad();
     console.error(err);
     toast('❌ Erreur : ' + (err.message || 'inconnue'));
   }
-}
-
-/* ============================================================
-   WHATSAPP — Ouvre l'app immédiatement + télécharge le PDF
-   ============================================================ */
-function envoyerWhatsApp(){
-  var f = lire();
-  if(!f.client.nom){ toast('⚠️ Indiquez le nom du client'); return; }
-  if(!f.lignes.length){ toast('⚠️ Ajoutez au moins une ligne'); return; }
-
-  // Construire le message
-  var txt = construireTexte(f);
-  var num = (f.client.tel || '').replace(/[^\d]/g,'');
-  if(num.length === 9 && num[0] === '7') num = '221' + num;
-  
-  var waUrl = num.length >= 8 
-    ? 'https://wa.me/' + num + '?text=' + encodeURIComponent(txt)
-    : 'https://wa.me/?text=' + encodeURIComponent(txt);
-
-  // 1. Ouvrir WhatsApp IMMÉDIATEMENT (avant tout await)
-  var win = window.open(waUrl, '_blank');
-  if(!win){ location.href = waUrl; }
-  
-  toast('💬 WhatsApp ouvert — PDF en téléchargement...');
-
-  // 2. Télécharger le PDF en arrière-plan
-  creerPDFBlob().then(function(blob){
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement('a');
-    a.href = url;
-    a.download = nomFichier();
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(function(){ URL.revokeObjectURL(url); }, 5000);
-    toast('📄 PDF téléchargé ! Joignez-le avec 📎 dans WhatsApp');
-  }).catch(function(err){
-    console.error(err);
-    toast('⚠️ Erreur PDF : ' + (err.message || 'inconnue'));
-  });
-}
-
-/* ============================================================
-   TELEGRAM — Ouvre l'app immédiatement + télécharge le PDF
-   ============================================================ */
-function envoyerTelegram(){
-  var f = lire();
-  if(!f.client.nom){ toast('⚠️ Indiquez le nom du client'); return; }
-  if(!f.lignes.length){ toast('⚠️ Ajoutez au moins une ligne'); return; }
-
-  var txt = construireTexte(f);
-  var tgUrl = 'https://t.me/share/url?url=' + encodeURIComponent('Facture ' + f.numero) + '&text=' + encodeURIComponent(txt);
-
-  // 1. Ouvrir Telegram immédiatement
-  var win = window.open(tgUrl, '_blank');
-  if(!win){ location.href = tgUrl; }
-  
-  toast('✈️ Telegram ouvert — PDF en téléchargement...');
-
-  // 2. Télécharger le PDF en arrière-plan
-  creerPDFBlob().then(function(blob){
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement('a');
-    a.href = url;
-    a.download = nomFichier();
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(function(){ URL.revokeObjectURL(url); }, 5000);
-    toast('📄 PDF téléchargé ! Joignez-le avec 📎 dans Telegram');
-  }).catch(function(err){
-    console.error(err);
-    toast('⚠️ Erreur PDF : ' + (err.message || 'inconnue'));
-  });
 }
 
 /* Texte du récapitulatif */
@@ -860,8 +942,6 @@ function construireTexte(d){
   }
   L.push('');
   L.push('Merci pour votre confiance 🙏');
-  L.push('');
-  L.push('📎 *Le PDF de la facture est joint.*');
   return L.join('\n');
 }
 
@@ -882,6 +962,7 @@ $$('.tab').forEach(function(t){
 $('#btnAddLigne').addEventListener('click', function(){
   var tr = ajouterLigne();
   tr.querySelector('.l-des').focus();
+  planifierPreGen();
 });
 
 $('#lignesBody').addEventListener('click', function(e){
@@ -894,6 +975,7 @@ $('#lignesBody').addEventListener('click', function(e){
     });
   } else { tr.remove(); }
   calcTotaux();
+  planifierPreGen();
 });
 
 $('#paper').addEventListener('input', function(e){
@@ -989,6 +1071,7 @@ $('#histoListe').addEventListener('click', function(e){
     document.querySelector('.tab[data-tab="facture"]').classList.add('active');
     $('#panel-facture').classList.add('active');
     toast('Facture chargée');
+    planifierPreGen();
   }
   if(act === 'dup'){
     var copie = JSON.parse(JSON.stringify(f));
@@ -1000,6 +1083,7 @@ $('#histoListe').addEventListener('click', function(e){
     document.querySelector('.tab[data-tab="facture"]').classList.add('active');
     $('#panel-facture').classList.add('active');
     toast('Copie créée');
+    planifierPreGen();
   }
   if(act === 'del'){
     if(confirm('Supprimer ' + f.numero + ' ?')){
@@ -1100,7 +1184,8 @@ function demarrer(){
   renderHistorique();
   majStats();
   
-  console.log('✅ App démarrée');
+  console.log('✅ App démarrée — version cache PDF');
+  console.log('Web Share API:', navigator.canShare ? 'OK' : 'NON SUPPORTÉ');
 }
 
 if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', demarrer);
@@ -1109,4 +1194,4 @@ else demarrer();
 })();
 </script>
 </body>
-</html>
+  </html>
